@@ -35,14 +35,14 @@ The ‍`results` directory contains generated plausible patches for each benchma
 
 3. Prepare evaluation benchmarks and tree-sitter language grammars:
 
-    Place the evaluation benchmarks in the `benchmarks` directory. Repositories for [QuixBugs](https://github.com/jkoppel/QuixBugs), [Defects4J](https://github.com/rjust/defects4j/), [Bears](https://github.com/bears-bugs/bears-benchmark), and [BugAID](https://dl.acm.org/doi/abs/10.1145/2950290.2950308) are already there. Defects4J needs further steps to install:
+    Place the evaluation benchmarks in the `benchmarks` directory. Appropriate version of repositories for [QuixBugs](https://github.com/jkoppel/QuixBugs), [Defects4J](https://github.com/rjust/defects4j/), [Bears](https://github.com/bears-bugs/bears-benchmark), and [BugAID](https://dl.acm.org/doi/abs/10.1145/2950290.2950308) are already there. QuixBugs requires [Gradle](https://gradle.org/) to work and Defects4J needs further steps to install:
 
     ```bash
     cd benchmarks/Defects4J
     cpanm --installdeps .
     ./init.sh
     ```
-    For further information, follow [Defects4J set up instructions](https://github.com/rjust/defects4j/#setting-up-defects4j).
+    For further information, follow [Defects4J set up instructions](https://github.com/rjust/defects4j/tree/4c41759f109e0ae48ab3c9934d032428fc15a04c#setting-up-defects4j).
 
     For the [Codeflaws](https://codeflaws.github.io/) benchmark, download [codeflaws.tar.gz](http://www.comp.nus.edu.sg/%7Erelease/codeflaws/codeflaws.tar.gz) archive and extract it in the `benchmarks/Codeflaws` directory. For [ManyBugs](https://repairbenchmarks.cs.umass.edu/) benchmark, the necessary files are in `benchmarks/ManyBugs.7z`, which you can directly extract in the `benchmarks` directory, but you can also download the complete [scenario tarballs](https://repairbenchmarks.cs.umass.edu/ManyBugs/scenarios/) and extract them in the `benchmarks/ManyBugs/scenarios` directory.
     
