@@ -259,7 +259,7 @@ def worker_func(bug: dict[str, Any]) -> tuple[str, list[DiffHunk]]:
 
 
 def main():
-    n_jobs = 6
+    n_jobs = 1
     bug_hunks: dict[str, list[DiffHunk]] = {}
 
     bears_bugs_meta = bears_root / "docs/data/bears-bugs.json"
