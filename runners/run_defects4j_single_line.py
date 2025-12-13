@@ -22,10 +22,6 @@ from ast_utils import (
 
 ASSETS_PATH = Path("generated_assets/Defects4J/Defects4J.jsonl")
 
-# -------------------------
-# Utilities
-# -------------------------
-
 
 def call_llm(llm: Model, buggy_line: str, context: str) -> str:
     prompt = f"""
@@ -39,10 +35,6 @@ def call_llm(llm: Model, buggy_line: str, context: str) -> str:
     """
     return llm.generate(prompt)
 
-
-# -------------------------
-# Context extraction
-# -------------------------
 
 def extract_forward_slice(source_code: str,
                           line_no: int,
