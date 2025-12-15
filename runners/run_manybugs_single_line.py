@@ -95,12 +95,16 @@ def main():
                 # ----------------------------------
                 # STEP 2: extract context
                 # ----------------------------------
-                context = extract_context(
-                    buggy_file,
-                    line_no,
-                    context_type="method",
-                ) or ""
-                print(f"Context: {context}")
+                try:
+                    context = extract_context(
+                        buggy_file,
+                        line_no,
+                        context_type="backward_slice",
+                    ) or ""
+                    print(f"Context: {context}")
+                except ValueError as e:
+                    print(f"[CONTEXT FALLBACK] {bug_id}:{line_no} – {e}")
+                    context = buggy_line  # or empty / window context
 
                 # ----------------------------------
                 # STEP 3: LLM repair

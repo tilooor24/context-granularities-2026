@@ -28,6 +28,17 @@ def infer_language(file_path: Path) -> str:
     raise ValueError(f"Cannot infer language from filename: {file_path}")
 
 
+def infer_slicing_lang(file_path: Path) -> Lang:
+    lang = infer_language(file_path)
+
+    if lang == "java":
+        return Lang.JAVA
+    if lang == "c":
+        return Lang.C
+
+    raise ValueError(f"Unsupported language for slicing: {file_path}")
+
+
 def get_parser_for_file(file_path: Path) -> Parser | None:
     lang = infer_language(file_path)
 
@@ -69,9 +80,10 @@ def extract_forward_slice(source_code: str,
 
 def extract_backward_slice(source_code: str,
                            line_no: int,
-                           ellipses: bool) -> str:
+                           ellipses: bool,
+                           lang: Lang = Lang.JAVA) -> str:
+    print(f"Language: {lang}")
     source_lines = source_code.splitlines()
-    lang: Lang = Lang.JAVA
 
     manager_by_source = ProgramGraphsManager(source_code, lang)
     manager_pdg = manager_by_source.program_dependence_graph
@@ -102,9 +114,11 @@ def extract_context(
     context_type: str = "method",
 ) -> str:
     """
-    context_type ∈ {line, window, method, class}
+    context_type ∈ {line, fixed, method, class}
     """
-    lang = infer_language(file_path)
+    lang = infer_slicing_lang(file_path)
+    print(f"Lang: {lang}")
+
     parser = get_parser_for_file(file_path)
 
     code = file_path.read_text()
@@ -128,7 +142,7 @@ def extract_context(
 
     if context_type == "method":
         target_types = (
-            {"method_declaration"} if lang == "java"
+            {"method_declaration"} if lang == Lang.JAVA
             else {"function_definition"}  # C
         )
 
@@ -145,12 +159,12 @@ def extract_context(
         return code[class_node.start_byte:class_node.end_byte]
 
     if context_type == "backward_slice":
-        slice = extract_backward_slice(code, line_no-1, False)
+        slice = extract_backward_slice(code, line_no-1, False, lang=lang)
         print(f"Backward slice: {slice}\n\n")
         return slice
 
     if context_type == "forward_slice":
-        slice = extract_forward_slice(code, line_no-1, False)
+        slice = extract_forward_slice(code, line_no-1, False, lang=lang)
         print(f"Backward slice: {slice}\n\n")
         return slice
 
