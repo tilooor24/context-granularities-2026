@@ -7,9 +7,21 @@ JAVA_LANGUAGE = Language(
     str("tools/tree-sitter-lib/" "build/my-languages.so"), "java")
 
 
+C_LANGUAGE = Language(
+    "tools/tree-sitter-lib/build/my-languages.so",
+    "c",
+)
+
+
 def get_java_parser() -> Parser:
     parser = Parser()
     parser.set_language(JAVA_LANGUAGE)
+    return parser
+
+
+def get_c_parser() -> Parser:
+    parser = Parser()
+    parser.set_language(C_LANGUAGE)
     return parser
 
 

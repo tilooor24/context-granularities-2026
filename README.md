@@ -121,3 +121,7 @@ If you use T5APR in your research, please cite the following paper:
   doi = {10.1016/j.jss.2024.112083},
 }
 ```
+
+- brew install p7zip
+- cd benchmarks     
+- 7z x ManyBugs.7z

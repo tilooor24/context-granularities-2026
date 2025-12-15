@@ -1,14 +1,42 @@
 from pathlib import Path
+from tree_sitter import Parser
 from program_slicing.graph.parse import Lang
 from program_slicing.graph.manager import ProgramGraphsManager
 from program_slicing.decomposition.program_slice import ProgramSlice
 from ast_utils import (
     get_java_parser,
+    get_c_parser,
     find_enclosing,
     find_node_at_line,
     find_stmt_at_line_number,
     preorder_traversal
 )
+
+
+def infer_language(file_path: Path) -> str:
+    """
+    Infer source language from ManyBugs / Defects4J style filenames.
+    """
+    name = file_path.name.lower()
+
+    if ".java" in name:
+        return "java"
+
+    if ".c" in name or ".h" in name:
+        return "c"
+
+    raise ValueError(f"Cannot infer language from filename: {file_path}")
+
+
+def get_parser_for_file(file_path: Path) -> Parser | None:
+    lang = infer_language(file_path)
+
+    if lang == "java":
+        return get_java_parser()
+    elif lang == "c":
+        return get_c_parser()
+    else:
+        raise ValueError(f"Unsupported language: {lang}")
 
 
 def extract_forward_slice(source_code: str,
@@ -76,7 +104,8 @@ def extract_context(
     """
     context_type ∈ {line, window, method, class}
     """
-    parser = get_java_parser()
+    lang = infer_language(file_path)
+    parser = get_parser_for_file(file_path)
 
     code = file_path.read_text()
     lines = code.splitlines()
@@ -98,10 +127,16 @@ def extract_context(
         raise ValueError(f"No AST node found at line {line_no}")
 
     if context_type == "method":
-        method_node = find_enclosing(stmt_node, {"method_declaration"})
-        if not method_node:
-            raise ValueError("No enclosing method found")
-        return code[method_node.start_byte:method_node.end_byte]
+        target_types = (
+            {"method_declaration"} if lang == "java"
+            else {"function_definition"}  # C
+        )
+
+        enclosing = find_enclosing(stmt_node, target_types)
+        if not enclosing:
+            raise ValueError("No enclosing method/function found")
+
+        return code[enclosing.start_byte : enclosing.end_byte]
 
     if context_type == "class":
         class_node = find_enclosing(stmt_node, {"class_declaration"})
