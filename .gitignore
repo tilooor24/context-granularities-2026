@@ -15,6 +15,7 @@ __pycache__/
 benchmarks/Codeflaws/
 benchmarks/ManyBugs/
 models/
+results/
 
 generated_assets/**
 !generated_assets/**/

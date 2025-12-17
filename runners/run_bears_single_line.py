@@ -1,10 +1,13 @@
 import json
 import shutil
 import tempfile
+import argparse
 import subprocess
 from pathlib import Path
+from datetime import datetime
 from patch_utils import insert_patch
 from slice_utils import extract_context
+from score_utils import calculate_pass_at_k
 
 from model import Model
 
@@ -76,7 +79,12 @@ def cleanup_bears_worktree(checkout_dir: Path) -> None:
         pass
 
 
-def call_llm(llm: Model, buggy_line: str, context: str) -> str:
+def call_llm(
+    llm: Model,
+    buggy_line: str,
+    context: str,
+    n: int,
+) -> list[str]:
     prompt = f"""
     Buggy line:
     {buggy_line}
@@ -86,97 +94,223 @@ def call_llm(llm: Model, buggy_line: str, context: str) -> str:
 
     Return ONLY the corrected Java line.
     """
-    return llm.generate(prompt)
+
+    patches = []
+    for _ in range(n):
+        patch = llm.generate(prompt).strip()
+        patches.append(patch)
+
+    return patches
 
 
 def main():
-    llm = Model(
-        model_name="gpt-4o-mini",
-        temperature=0.0,
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--max_tasks",
+        type=int,
+        default=None,
+        help="Maximum number of single-line bugs (tasks) to run"
+    )
+    parser.add_argument(
+        "--context_type",
+        type=str,
+        default="method",
+        help="Type of context to extract (e.g., 'method', 'backward_slice')"
+    )
+    parser.add_argument(
+        "--start_task_idx",
+        type=int,
+        default=0,
+        help="Index of the first eligible BEARS task to run (0-based)"
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="gpt-4o-mini",
+        help="LLM model name to use for patch generation"
     )
 
+    args = parser.parse_args()
+
+    context_type = args.context_type
+    start_task_idx = args.start_task_idx
+    max_tasks = args.max_tasks
+    model_name = args.model_name
+
+    task_count = 0
+    seen_tasks = 0
+
+    NUM_SAMPLES = 20  # number of patches per bug
+
+    llm = Model(
+        model_name=model_name,
+        temperature=0.7,  # IMPORTANT for pass@k
+    )
+
+    # -------------------------
+    # Output file
+    # -------------------------
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
+    out_path = results_dir / f"bears_results_{context_type}_{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    out_f = out_path.open("w")
+
+    # -------------------------
+    # Bug → branch map
+    # -------------------------
     BUG_BRANCH_MAP: dict[str, str] = {}
     with open("benchmarks/Bears/scripts/data/bug_id_and_branch.json") as f:
         data = json.load(f)
         for entry in data:
             BUG_BRANCH_MAP[entry["bugId"]] = entry["bugBranch"]
 
+    # -------------------------
+    # Loop over BEARS JSON
+    # -------------------------
     with ASSETS_PATH.open() as f:
         for raw in f:
             entry = json.loads(raw)
-            (bug_id, hunks) = next(iter(entry.items()))
+            bug_id, hunks = next(iter(entry.items()))
 
-            for hunk in hunks:
-                # Only single-line bugs
-                if hunk["removed_line_numbers_range"][1] != 1:
+            # Only process bugs that have exactly one hunk
+            if len(hunks) != 1:
+                continue
+
+            hunk = hunks[0]
+
+            # Only process single-line fixes
+            if hunk["added_lines"].count("\n") > 1:
+                continue
+
+            seen_tasks += 1
+
+            # Skip until we reach the start index
+            if seen_tasks <= start_task_idx:
+                continue
+
+            task_count += 1
+            if max_tasks is not None and task_count >= max_tasks:
+                print(f"\nReached max_tasks={max_tasks}, stopping.")
+                out_f.close()
+                print(f"Results written to {out_path}")
+                return
+
+            branch = BUG_BRANCH_MAP[bug_id]
+            source_path = Path(hunk["source_path"])
+            buggy_line = hunk["removed_lines"].rstrip()
+            expected_fix = hunk["added_lines"].rstrip()
+            line_no, bug_len = hunk["removed_line_numbers_range"]
+
+            print(f"\n=== {bug_id}:{line_no} ===")
+            print(f"Buggy line:    {buggy_line}")
+            print(f"Expected fix: {expected_fix}")
+
+            # -------------------------
+            # STEP 1: checkout buggy version (context only)
+            # -------------------------
+            checkout_dir = Path(tempfile.mkdtemp(prefix="bears_ctx_"))
+            try:
+                checkout_bears_bug(branch, checkout_dir)
+                java_file = checkout_dir / source_path
+                assert java_file.exists(), f"Missing file: {java_file}"
+
+                # -------------------------
+                # STEP 2: extract context
+                # -------------------------
+                try:
+                    context = extract_context(java_file, line_no, context_type=context_type)
+                    print(f"Context: {context}")
+                except Exception as e:
+                    print(f"Skipping bug {bug_id}:{line_no} — context extraction failed: {e}")
                     continue
 
-                branch = BUG_BRANCH_MAP[bug_id]
-                source_path = Path(hunk["source_path"])
-                buggy_line = hunk["removed_lines"].rstrip()
-                line_no, bug_len = hunk["removed_line_numbers_range"]
+            finally:
+                cleanup_bears_worktree(checkout_dir)
 
-                print(f"\n=== {bug_id}:{line_no} ===")
-                print(f"Buggy line: {buggy_line}")
+            # -------------------------
+            # STEP 3: LLM repair
+            # -------------------------
+            patches = call_llm(
+                llm=llm,
+                buggy_line=buggy_line,
+                context=context,
+                n=NUM_SAMPLES,
+            )
 
-                checkout_dir = Path(tempfile.mkdtemp(prefix="bears_"))
+            scores = []  # 1 = pass, 0 = fail
+            all_patches = []  # store patches
 
+            for i, patch in enumerate(patches):
+                all_patches.append(patch)
+                print(f"\n--- Sample {i+1}/{NUM_SAMPLES} ---")
+                print("Patch:", patch)
+                print(f"Expected fix: {expected_fix}")
+
+                sample_checkout_dir = Path(tempfile.mkdtemp(prefix="bears_sample_"))
                 try:
-                    # ---------------------------------------------
-                    # STEP 1: checkout buggy version
-                    # ---------------------------------------------
-                    checkout_bears_bug(branch, checkout_dir)
+                    try:
+                        checkout_bears_bug(branch, sample_checkout_dir)
+                    except subprocess.CalledProcessError as e:
+                        print(f"⚠️ Failed to checkout branch for sample {i+1}: {e}")
+                        scores.append(0)  # mark as failed
+                        continue  # skip this sample and go to the next patch
 
-                    java_file = checkout_dir / source_path
-                    assert java_file.exists(), f"Missing file: {java_file}"
+                    sample_java_file = sample_checkout_dir / source_path
+                    if not sample_java_file.exists():
+                        print(f"⚠️ Missing file: {sample_java_file}")
+                        scores.append(0)
+                        continue
 
-                    # ---------------------------------------------
-                    # STEP 2: extract context
-                    # ---------------------------------------------
-                    context = extract_context(
-                        java_file,
-                        line_no,
-                        context_type="backward_slice",
-                    )
-                    print(f"Context: {context}")
-
-                    # ---------------------------------------------
-                    # STEP 3: LLM repair
-                    # ---------------------------------------------
-                    patch = call_llm(
-                        llm=llm,
-                        buggy_line=buggy_line,
-                        context=context,
-                    ).strip()
-
-                    print("LLM patch:", patch)
-
-                    # ---------------------------------------------
+                    # -------------------------
                     # STEP 4: insert patch
-                    # ---------------------------------------------
-                    indent_size = (
-                        len(hunk["added_lines"])
-                        - len(hunk["added_lines"].lstrip(" \t"))
-                    )
+                    # -------------------------
+                    indent_size = len(hunk["added_lines"]) - len(hunk["added_lines"].lstrip(" \t"))
                     indent = hunk["added_lines"][:indent_size]
 
                     insert_patch(
                         patch,
-                        java_file,
-                        java_file,
+                        sample_java_file,
+                        sample_java_file,
                         line_no,
                         bug_len,
                         indent,
                     )
 
-                    # ---------------------------------------------
+                    # -------------------------
                     # STEP 5: run tests
-                    # ---------------------------------------------
-                    passed = run_bears_tests(checkout_dir)
+                    # -------------------------
+                    passed = run_bears_tests(sample_checkout_dir)
+                    scores.append(1 if passed else 0)
                     print("LLM result:", passed)
 
                 finally:
-                    cleanup_bears_worktree(checkout_dir)
+                    cleanup_bears_worktree(sample_checkout_dir)
+
+            # -------------------------
+            # Record results
+            # -------------------------
+            result = {
+                "bug_id": bug_id,
+                "line_no": line_no,
+                "source_path": str(source_path),
+                "buggy_line": buggy_line,
+                "expected_fix": expected_fix,
+                "patches": all_patches,
+                "num_samples": NUM_SAMPLES,
+                "scores": scores,
+                "num_passed": sum(scores),
+                "pass_at_1": calculate_pass_at_k(1, scores),
+                "pass_at_5": calculate_pass_at_k(5, scores),
+                "pass_at_10": calculate_pass_at_k(10, scores),
+                "pass_at_20": calculate_pass_at_k(20, scores),
+            }
+
+            out_f.write(json.dumps(result) + "\n")
+            out_f.flush()
+            print(f"Scores: {scores}")
+
+    out_f.close()
+    print(f"\nResults written to {out_path}")
 
 
 if __name__ == "__main__":
