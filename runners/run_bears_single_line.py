@@ -17,32 +17,72 @@ benchmarks_root: Path = project_root / "benchmarks"
 bears_root: Path = benchmarks_root / "Bears"
 
 
-def checkout_bears_bug(branch: str, checkout_dir: Path) -> None:
+# def checkout_bears_bug(branch: str, checkout_dir: Path) -> None:
+#     """
+#     Create a BEARS buggy checkout using git worktrees.
+#     """
+#     subprocess.run(
+#         [
+#             "git",
+#             "-C",
+#             str(bears_root),
+#             "worktree",
+#             "add",
+#             str(checkout_dir),
+#             branch],
+#         check=True,
+#     )
+
+#     # BEARS convention: buggy version is HEAD~2
+#     subprocess.run(
+#         ["git", "-C", str(checkout_dir), "checkout", "HEAD~2"],
+#         check=True,
+#     )
+
+#     # Detach worktree from git metadata (important!)
+#     git_file = checkout_dir / ".git"
+#     if git_file.exists():
+#         git_file.unlink()
+
+
+def checkout_bears_bug(branch: str, checkout_dir: Path) -> bool:
     """
     Create a BEARS buggy checkout using git worktrees.
+    Returns False if the worktree already exists or checkout fails.
     """
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(bears_root),
-            "worktree",
-            "add",
-            str(checkout_dir),
-            branch],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(bears_root),
+                "worktree",
+                "add",
+                str(checkout_dir),
+                branch,
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] git worktree add failed for {branch}: {e}")
+        return False
 
     # BEARS convention: buggy version is HEAD~2
-    subprocess.run(
-        ["git", "-C", str(checkout_dir), "checkout", "HEAD~2"],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "-C", str(checkout_dir), "checkout", "HEAD~2"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] git checkout failed for {branch}: {e}")
+        return False
 
     # Detach worktree from git metadata (important!)
     git_file = checkout_dir / ".git"
     if git_file.exists():
         git_file.unlink()
+
+    return True
 
 
 def run_bears_tests(checkout_dir: Path) -> bool:
@@ -210,7 +250,11 @@ def main():
             # -------------------------
             checkout_dir = Path(tempfile.mkdtemp(prefix="bears_ctx_"))
             try:
-                checkout_bears_bug(branch, checkout_dir)
+                ok = checkout_bears_bug(branch, checkout_dir)
+                if not ok:
+                    print(f"[WARN] Skipping Bears bug {bug_id} due to worktree conflict")
+                    continue
+
                 java_file = checkout_dir / source_path
                 assert java_file.exists(), f"Missing file: {java_file}"
 
