@@ -60,3 +60,11 @@ def insert_patch(
 
     with open(target_file_path, "w", encoding="cp1256") as file:
         file.writelines(lines)
+
+
+def strip_outer_quotes_once(s: str) -> str:
+    if s is None:
+        return ""
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
