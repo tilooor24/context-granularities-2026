@@ -78,33 +78,90 @@ def extract_forward_slice(source_code: str,
     return None
 
 
-def extract_backward_slice(source_code: str,
-                           line_no: int,
-                           ellipses: bool,
-                           lang: Lang = Lang.JAVA) -> str:
-    print(f"Language: {lang}")
-    source_lines = source_code.splitlines()
+# def extract_backward_slice(source_code: str,
+#                            line_no: int,
+#                            ellipses: bool,
+#                            lang: Lang = Lang.JAVA) -> str:
+#     print(f"Language: {lang}")
+#     source_lines = source_code.splitlines()
 
+#     manager_by_source = ProgramGraphsManager(source_code, lang)
+#     manager_pdg = manager_by_source.program_dependence_graph
+#     target_stmt = find_stmt_at_line_number(
+#         list(manager_pdg.nodes),
+#         line_number=line_no
+#     )
+#     preds = dict(manager_pdg.pred)
+
+#     if target_stmt and target_stmt in preds:
+#         target_preds = preorder_traversal(
+#             target_stmt,
+#             set(),
+#             preds,
+#             source_lines)
+#         slice_nodes = set(target_preds) | {target_stmt}
+#         slice = ProgramSlice(
+#             source_lines=source_lines,
+#             context=manager_by_source).from_statements(slice_nodes)
+#         return slice
+
+#     return None
+
+def extract_backward_slice(
+    source_code: str,
+    line_no: int,
+    ellipses: bool,
+    lang: Lang = Lang.JAVA
+) -> str:
+    print(f"[DEBUG] Starting extract_backward_slice")
+    print(f"[DEBUG] Language: {lang}")
+    print(f"[DEBUG] Target line number: {line_no}")
+
+    source_lines = source_code.splitlines()
+    print(f"[DEBUG] Total lines in source: {len(source_lines)}")
+
+    # Initialize program dependence manager
     manager_by_source = ProgramGraphsManager(source_code, lang)
     manager_pdg = manager_by_source.program_dependence_graph
+    print(f"[DEBUG] PDG nodes count: {len(manager_pdg.nodes)}")
+    print(f"[DEBUG] PDG preds count: {len(manager_pdg.pred)}")
+
+    # Find the statement at the target line
     target_stmt = find_stmt_at_line_number(
         list(manager_pdg.nodes),
         line_number=line_no
     )
-    preds = dict(manager_pdg.pred)
+    if target_stmt:
+        print(f"[DEBUG] Found target statement: {target_stmt}")
+    else:
+        print(f"[DEBUG] No statement found at line {line_no}")
 
-    if target_stmt and target_stmt in preds:
+    preds = dict(manager_pdg.pred)
+    if target_stmt in preds:
+        print(f"[DEBUG] Target statement has predecessors in PDG")
         target_preds = preorder_traversal(
             target_stmt,
             set(),
             preds,
-            source_lines)
-        slice_nodes = set(target_preds) | {target_stmt}
-        slice = ProgramSlice(
-            source_lines=source_lines,
-            context=manager_by_source).from_statements(slice_nodes)
-        return slice
+            source_lines
+        )
+        # print(f"[DEBUG] Preorder traversal returned {len(target_preds)} predecessor nodes")
 
+        slice_nodes = set(target_preds) | {target_stmt}
+        # print(f"[DEBUG] Total slice nodes (including target): {len(slice_nodes)}")
+
+        slice_obj = ProgramSlice(
+            source_lines=source_lines,
+            context=manager_by_source
+        ).from_statements(slice_nodes)
+        print(f"Slice object: {slice_obj}")
+        # print(f"[DEBUG] Extracted backward slice length (lines): {len(slice_obj.splitlines())}")
+        return slice_obj
+
+    else:
+        print(f"[DEBUG] Target statement has no predecessors in PDG")
+
+    print(f"[DEBUG] Returning None for backward slice")
     return None
 
 
@@ -117,12 +174,16 @@ def extract_context(
     context_type ∈ {line, fixed, method, class}
     """
     lang = infer_slicing_lang(file_path)
-    print(f"Lang: {lang}")
+    # print(f"Lang: {lang}")
 
     parser = get_parser_for_file(file_path)
+    # print(f"Parser for {file_path}:", parser)
 
     code = file_path.read_text()
     lines = code.splitlines()
+
+    if context_type == "file":
+        return code
 
     if context_type == "line":
         return lines[line_no - 1]
@@ -160,7 +221,6 @@ def extract_context(
 
     if context_type == "backward_slice":
         slice = extract_backward_slice(code, line_no-1, False, lang=lang)
-        print(f"Backward slice: {slice}\n\n")
         return slice
 
     if context_type == "forward_slice":
