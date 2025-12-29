@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import shutil
@@ -5,10 +6,11 @@ import tempfile
 import argparse
 import traceback
 from tqdm import tqdm
+from typing import Any
 from pathlib import Path
 import multiprocessing as mp
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 
 from model import Model
@@ -97,14 +99,6 @@ def eval_one_patch(args) -> tuple[int, str, int]:
 
         insert_patch(patch, sample_java_file, sample_java_file, line_no, bug_len, indent)
 
-        with open(sample_java_file) as f:
-            lines = f.readlines()
-        print("----- PATCH CONTEXT -----")
-        for i in range(line_no - 3, line_no + 2):
-            if 0 <= i - 1 < len(lines):
-                print(f"{i}: {lines[i-1].rstrip()}")
-        print("-------------------------")
-
         passed = run_tests(sample_dir, timeout_sec=timeout_sec)
         print(f"Passed: {passed}")
         return (idx, patch, 1 if passed else 0)
@@ -151,6 +145,71 @@ def resolve_java_file(checkout_dir: Path, src_root: Path, source_path: Path) -> 
 
     # Give the best candidate for debugging
     return candidate
+
+
+def score_one_patch_worker(
+    *,
+    bug_id: str,
+    patch_idx: int,
+    patch: str,
+    num_samples: int,
+    source_path_str: str,
+    line_no: int,
+    bug_len: int,
+    indent: str,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    """
+    Returns a dict so caller can log errors without crashing the whole task.
+    """
+    patch = (patch or "")
+    source_path = Path(source_path_str)
+
+    sample_dir = Path(tempfile.mkdtemp(prefix="d4j_sample_"))
+    try:
+        t0 = time.time()
+
+        # checkout
+        checkout_bug(*bug_id.split(), sample_dir)
+
+        src_root = get_src_root(sample_dir)
+        sample_java_file = resolve_java_file(sample_dir, src_root, source_path)
+
+        if not sample_java_file.exists() or not patch:
+            return {
+                "patch_idx": patch_idx,
+                "score": 0,
+                "passed": False,
+                "reason": "missing_file_or_empty_patch",
+                "elapsed_sec": time.time() - t0,
+            }
+
+        # apply patch
+        insert_patch(patch, sample_java_file, sample_java_file, line_no, bug_len, indent)
+
+        # run tests
+        print(f"[{_ts()}] {bug_id} sample {patch_idx+1} RUN TESTS...", flush=True)
+        passed = run_tests(sample_dir, timeout_sec=900)  # 15 min hard timeout
+        print(f"[{_ts()}] {bug_id} sample {patch_idx+1} tests done passed={passed} in {time.time()-t2:.2f}s", flush=True)
+
+        return {
+            "patch_idx": patch_idx,
+            "score": 1 if passed else 0,
+            "passed": bool(passed),
+            "reason": None,
+            "elapsed_sec": time.time() - t0,
+        }
+
+    except Exception as e:
+        return {
+            "patch_idx": patch_idx,
+            "score": 0,
+            "passed": False,
+            "reason": f"error:{type(e).__name__}:{e}",
+            "traceback": traceback.format_exc(),
+        }
+    finally:
+        shutil.rmtree(sample_dir, ignore_errors=True)
 
 
 def process_task(task: dict) -> dict:
@@ -221,48 +280,96 @@ def process_task(task: dict) -> dict:
         return {"bug_id": bug_id, "error": f"LLM failed: {type(e).__name__}: {repr(e)}", "traceback": traceback.format_exc()}
 
     # -------------------------
-    # STEP 3: score patches (fresh checkout per patch)
+    # STEP 3: score patches (parallel)
     # -------------------------
-    scores = []
+    scores = [0] * len(patches)
     all_patches = []
+    timeout_sec = 900
 
-    for i, patch in enumerate(patches):
-        patch = (patch or "").strip()
-        all_patches.append(patch)
+    # keep logs deterministic by storing patch strings first
+    for p in patches:
+        all_patches.append((p or "").strip())
 
-        print(f"[{_ts()}] {bug_id} sample {i+1}/{num_samples} patch_len={len(patch)}", flush=True)
+    # Tune this carefully: too high can thrash CPU/disk and slow you down.
+    # Rule of thumb: 2–4 concurrent test runs per machine.
+    max_test_workers = int(os.getenv("D4J_TEST_WORKERS", "3"))
 
-        sample_dir = Path(tempfile.mkdtemp(prefix="d4j_sample_"))
-        try:
-            t2 = time.time()
-            print(f"[{_ts()}] {bug_id} sample {i+1} checkout -> {sample_dir}", flush=True)
-            checkout_bug(*bug_id.split(), sample_dir)
+    print(f"[{_ts()}] {bug_id} scoring {len(all_patches)} patches with workers={max_test_workers}", flush=True)
 
-            src_root = get_src_root(sample_dir)
-            sample_java_file = resolve_java_file(sample_dir, src_root, source_path)
-            print(f"[{_ts()}] {bug_id} sample {i+1} java_file={sample_java_file} exists={sample_java_file.exists()}", flush=True)
+    with ProcessPoolExecutor(max_workers=max_test_workers) as ex:
+        futs = []
+        for i, patch in enumerate(all_patches):
+            print(f"[{_ts()}] {bug_id} enqueue sample {i+1}/{num_samples} patch_len={len(patch)}", flush=True)
 
-            if not sample_java_file.exists() or not patch:
-                scores.append(0)
-                print(f"[{_ts()}] {bug_id} sample {i+1} SKIP (missing file or empty patch)", flush=True)
-                continue
+            futs.append(
+                ex.submit(
+                    score_one_patch_worker,
+                    bug_id=bug_id,
+                    patch_idx=i,
+                    patch=patch,
+                    num_samples=num_samples,
+                    source_path_str=str(source_path),
+                    line_no=line_no,
+                    bug_len=bug_len,
+                    indent=indent,
+                    timeout_sec=timeout_sec,
+                )
+            )
 
-            print(f"[{_ts()}] {bug_id} sample {i+1} PATCH repr={repr(patch)}", flush=True)
-            print(f"[{_ts()}] {bug_id} sample {i+1} INDENT repr={repr(indent)}", flush=True)
-            insert_patch(patch, sample_java_file, sample_java_file, line_no, bug_len, indent)
+        for fut in as_completed(futs):
+            r = fut.result()
+            i = r["patch_idx"]
+            scores[i] = r["score"]
 
-            # THIS is usually where "hangs" happen
-            print(f"[{_ts()}] {bug_id} sample {i+1} RUN TESTS...", flush=True)
-            passed = run_tests(sample_dir, timeout_sec=900)  # 15 min hard timeout
-            print(f"[{_ts()}] {bug_id} sample {i+1} tests done passed={passed} in {time.time()-t2:.2f}s", flush=True)
+            # Optional logging
+            if r.get("reason"):
+                print(f"[{_ts()}] {bug_id} sample {i+1} done score={scores[i]} reason={r['reason']}", flush=True)
+            else:
+                print(f"[{_ts()}] {bug_id} sample {i+1} done score={scores[i]} elapsed={r.get('elapsed_sec', 0):.2f}s", flush=True)
 
-            scores.append(1 if passed else 0)
+    # # -------------------------
+    # # STEP 3: score patches (fresh checkout per patch)
+    # # -------------------------
+    # scores = []
+    # all_patches = []
 
-        except Exception as e:
-            scores.append(0)
-            print(f"[{_ts()}] {bug_id} sample {i+1} ERROR {type(e).__name__}: {e}", flush=True)
-        finally:
-            shutil.rmtree(sample_dir, ignore_errors=True)
+    # for i, patch in enumerate(patches):
+    #     patch = (patch or "").strip()
+    #     all_patches.append(patch)
+
+    #     print(f"[{_ts()}] {bug_id} sample {i+1}/{num_samples} patch_len={len(patch)}", flush=True)
+
+    #     sample_dir = Path(tempfile.mkdtemp(prefix="d4j_sample_"))
+    #     try:
+    #         t2 = time.time()
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} checkout -> {sample_dir}", flush=True)
+    #         checkout_bug(*bug_id.split(), sample_dir)
+
+    #         src_root = get_src_root(sample_dir)
+    #         sample_java_file = resolve_java_file(sample_dir, src_root, source_path)
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} java_file={sample_java_file} exists={sample_java_file.exists()}", flush=True)
+
+    #         if not sample_java_file.exists() or not patch:
+    #             scores.append(0)
+    #             print(f"[{_ts()}] {bug_id} sample {i+1} SKIP (missing file or empty patch)", flush=True)
+    #             continue
+
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} PATCH repr={repr(patch)}", flush=True)
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} INDENT repr={repr(indent)}", flush=True)
+    #         insert_patch(patch, sample_java_file, sample_java_file, line_no, bug_len, indent)
+
+    #         # THIS is usually where "hangs" happen
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} RUN TESTS...", flush=True)
+    #         passed = run_tests(sample_dir, timeout_sec=900)  # 15 min hard timeout
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} tests done passed={passed} in {time.time()-t2:.2f}s", flush=True)
+
+    #         scores.append(1 if passed else 0)
+
+    #     except Exception as e:
+    #         scores.append(0)
+    #         print(f"[{_ts()}] {bug_id} sample {i+1} ERROR {type(e).__name__}: {e}", flush=True)
+    #     finally:
+    #         shutil.rmtree(sample_dir, ignore_errors=True)
 
     result = {
         "bug_id": bug_id,
