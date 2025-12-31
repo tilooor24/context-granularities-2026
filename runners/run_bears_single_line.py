@@ -9,7 +9,9 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
-from patch_utils import insert_patch
+from typing import Any, Optional
+from tokens import count_tokens
+from patch_utils import insert_patch, strip_outer_quotes_once
 from slice_utils import extract_context
 from score_utils import calculate_pass_at_k
 
@@ -115,41 +117,56 @@ def call_llm(
     INSTRUCTIONS:
     - Output ONLY the replacement Java line.
     - Do NOT include explanations, comments, or extra text.
-    - Output must be exactly one line of valid Java code.
+    - You MUST wrap the output in a fenced code block labeled ```{LANG}```.
 
-    OUTPUT:
+    EXAMPLE OUTPUT:
     ```{LANG}
     <replacement line>
     ```
     """.strip()
 
-    # prompt = f"""
-    # You are fixing a Java bug.
+    # Token counts (local; accurate for OpenAI tokenizers)
+    model_name = getattr(llm, "model_name", None) or getattr(llm, "model", None) or "unknown"
+    context_tokens = count_tokens(context, model_name)
+    prompt_tokens_est = count_tokens(prompt, model_name)
 
-    # BUGGY LINE (replace this line):
-    # {buggy_line}
+    patches: list[str] = []
+    completion_tokens_est: list[int] = []
+    usage_from_api: list[dict[str, Any]] = []  # if your wrapper returns usage
 
-    # CONTEXT:
-    # {context}
-
-    # INSTRUCTIONS:
-    # - You MAY include a brief explanation if helpful.
-    # - You MUST include the final replacement line inside a fenced code block labeled ```{LANG}```.
-    # - The fenced code block MUST contain exactly ONE line: the replacement for the buggy line.
-    # - Do NOT include any other code blocks.
-
-    # REQUIRED OUTPUT FORMAT:
-    # ```{LANG}
-    # <replacement line>
-    # ```
-    # """.strip()
-
-    patches = []
     for _ in range(n):
-        patch = llm.generate(prompt).strip()
-        patches.append(patch)
+        # ---- If your Model.generate supports returning usage, prefer it ----
+        # Try a couple patterns without breaking older wrappers.
+        out = llm.generate(prompt)
 
-    return patches
+        # Pattern A: wrapper returns {"text": "...", "usage": {...}}
+        if isinstance(out, dict) and "text" in out:
+            patch_text = str(out["text"])
+            usage = out.get("usage")
+            if isinstance(usage, dict):
+                usage_from_api.append(usage)
+        else:
+            patch_text = str(out)
+
+        patch_text = patch_text.strip()
+        patch_text = strip_outer_quotes_once(patch_text)
+
+        patches.append(patch_text)
+        completion_tokens_est.append(count_tokens(patch_text, model_name))
+
+    return {
+        "prompt": prompt,  # optional; remove if you don’t want to save it
+        "patches": patches,
+        "token_estimates": {
+            "model_name_for_tokenizer": model_name,
+            "context_tokens": context_tokens,
+            "prompt_tokens": prompt_tokens_est,
+            "completion_tokens_per_sample": completion_tokens_est,
+            "completion_tokens_sum": sum(completion_tokens_est),
+            "total_tokens_est": prompt_tokens_est * n + sum(completion_tokens_est),
+        },
+        "api_usage_per_sample": usage_from_api,  # empty unless wrapper provides it
+    }
 
 
 def evaluate_patch(
@@ -221,7 +238,11 @@ def process_bears_bug(task):
     # STEP 3: generate patches
     # -------------------------
     try:
-        patches = call_llm(llm, buggy_line, context, n=NUM_SAMPLES)
+        # patches = call_llm(llm, buggy_line, context, n=NUM_SAMPLES)
+        llm_out = call_llm(llm, buggy_line, context, n=NUM_SAMPLES)
+        patches = llm_out["patches"]
+        token_estimates = llm_out["token_estimates"]
+        api_usage_per_sample = llm_out.get("api_usage_per_sample", [])
     except Exception as e:
         # return {"bug_id": bug_id, "error": f"LLM failed: {e}"}
         tb = traceback.format_exc()
@@ -257,6 +278,22 @@ def process_bears_bug(task):
         finally:
             cleanup_bears_worktree(sample_checkout_dir)
 
+    # return {
+    #     "bug_id": bug_id,
+    #     "line_no": line_no,
+    #     "source_path": str(source_path),
+    #     "buggy_line": buggy_line,
+    #     "expected_fix": expected_fix,
+    #     "patches": all_patches,
+    #     "num_samples": NUM_SAMPLES,
+    #     "scores": scores,
+    #     "num_passed": sum(scores),
+    #     "pass_at_1": calculate_pass_at_k(1, scores),
+    #     "pass_at_5": calculate_pass_at_k(5, scores),
+    #     "pass_at_10": calculate_pass_at_k(10, scores),
+    #     "pass_at_20": calculate_pass_at_k(20, scores),
+    # }
+
     return {
         "bug_id": bug_id,
         "line_no": line_no,
@@ -271,6 +308,10 @@ def process_bears_bug(task):
         "pass_at_5": calculate_pass_at_k(5, scores),
         "pass_at_10": calculate_pass_at_k(10, scores),
         "pass_at_20": calculate_pass_at_k(20, scores),
+
+        # NEW
+        "token_estimates": token_estimates,
+        "api_usage_per_sample": api_usage_per_sample,
     }
 
 

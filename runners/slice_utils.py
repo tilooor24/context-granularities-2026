@@ -5,7 +5,7 @@ from program_slicing.graph.manager import ProgramGraphsManager
 from program_slicing.decomposition.program_slice import ProgramSlice
 from ast_utils import (
     get_java_parser,
-    get_c_parser,
+    # get_c_parser,
     find_enclosing,
     find_node_at_line,
     find_stmt_at_line_number,
@@ -44,8 +44,8 @@ def get_parser_for_file(file_path: Path) -> Parser | None:
 
     if lang == "java":
         return get_java_parser()
-    elif lang == "c":
-        return get_c_parser()
+    # elif lang == "c":
+    #     return get_c_parser()
     else:
         raise ValueError(f"Unsupported language: {lang}")
 
@@ -118,13 +118,13 @@ def extract_backward_slice(
     print(f"[DEBUG] Target line number: {line_no}")
 
     source_lines = source_code.splitlines()
-    print(f"[DEBUG] Total lines in source: {len(source_lines)}")
+    # print(f"[DEBUG] Total lines in source: {len(source_lines)}")
 
     # Initialize program dependence manager
     manager_by_source = ProgramGraphsManager(source_code, lang)
     manager_pdg = manager_by_source.program_dependence_graph
-    print(f"[DEBUG] PDG nodes count: {len(manager_pdg.nodes)}")
-    print(f"[DEBUG] PDG preds count: {len(manager_pdg.pred)}")
+    # print(f"[DEBUG] PDG nodes count: {len(manager_pdg.nodes)}")
+    # print(f"[DEBUG] PDG preds count: {len(manager_pdg.pred)}")
 
     # Find the statement at the target line
     target_stmt = find_stmt_at_line_number(
@@ -220,8 +220,10 @@ def extract_context(
         return code[class_node.start_byte:class_node.end_byte]
 
     if context_type == "backward_slice":
-        slice = extract_backward_slice(code, line_no-1, False, lang=lang)
-        return slice
+        slice_obj = extract_backward_slice(code, line_no-1, False, lang=lang)
+        if slice_obj is None:
+            return None
+        return slice_obj.code
 
     if context_type == "forward_slice":
         slice = extract_forward_slice(code, line_no-1, False, lang=lang)

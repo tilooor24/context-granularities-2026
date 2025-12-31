@@ -35,10 +35,68 @@ def get_src_root(workdir: Path) -> Path:
 #     return "Failing tests: 0" in res.stdout
 
 
+# def run_tests(checkout_dir: Path, timeout_sec: int = 900) -> bool:
+#     """
+#     Runs Defects4J tests with a hard timeout.
+#     """
+#     cmd = ["defects4j", "test"]
+#     start = time.time()
+
+#     print(
+#         f"[{time.strftime('%H:%M:%S')}] RUN: {' '.join(cmd)} "
+#         f"(cwd={checkout_dir}) timeout={timeout_sec}s",
+#         flush=True,
+#     )
+
+#     try:
+#         proc = subprocess.run(
+#             cmd,
+#             cwd=str(checkout_dir),
+#             stdout=subprocess.PIPE,
+#             stderr=subprocess.STDOUT,
+#             text=True,
+#             timeout=timeout_sec,
+#         )
+#     except subprocess.TimeoutExpired as e:
+#         tail = "\n".join((e.stdout or "").splitlines()[-50:])
+#         print(
+#             f"[{time.strftime('%H:%M:%S')}] TIMEOUT after {timeout_sec}s\n"
+#             f"--- tail ---\n{tail}\n-----------",
+#             flush=True,
+#         )
+#         return False
+
+#     duration = time.time() - start
+#     passed = (proc.returncode == 0)
+
+#     if passed:
+#         print(
+#             f"[{time.strftime('%H:%M:%S')}] PASS in {duration:.2f}s",
+#             flush=True,
+#         )
+#     else:
+#         tail = "\n".join((proc.stdout or "").splitlines()[-80:])
+#         print(
+#             f"[{time.strftime('%H:%M:%S')}] FAIL rc={proc.returncode} in {duration:.2f}s\n"
+#             f"--- tail ---\n{tail}\n-----------",
+#             flush=True,
+#         )
+
+#     return passed
+
+
 def run_tests(checkout_dir: Path, timeout_sec: int = 900) -> bool:
     """
     Runs Defects4J tests with a hard timeout.
+    Always handles stdout safely (bytes vs str).
     """
+    def _safe_tail(raw, n: int) -> str:
+        if not raw:
+            return ""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        return "\n".join(raw.splitlines()[-n:])
+
     cmd = ["defects4j", "test"]
     start = time.time()
 
@@ -54,11 +112,14 @@ def run_tests(checkout_dir: Path, timeout_sec: int = 900) -> bool:
             cwd=str(checkout_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            text=True,                # request decoded output
+            encoding="utf-8",         # force UTF-8
+            errors="replace",         # never fail on decoding
             timeout=timeout_sec,
         )
+
     except subprocess.TimeoutExpired as e:
-        tail = "\n".join((e.stdout or "").splitlines()[-50:])
+        tail = _safe_tail(e.stdout, 50)
         print(
             f"[{time.strftime('%H:%M:%S')}] TIMEOUT after {timeout_sec}s\n"
             f"--- tail ---\n{tail}\n-----------",
@@ -75,9 +136,10 @@ def run_tests(checkout_dir: Path, timeout_sec: int = 900) -> bool:
             flush=True,
         )
     else:
-        tail = "\n".join((proc.stdout or "").splitlines()[-80:])
+        tail = _safe_tail(proc.stdout, 80)
         print(
-            f"[{time.strftime('%H:%M:%S')}] FAIL rc={proc.returncode} in {duration:.2f}s\n"
+            f"[{time.strftime('%H:%M:%S')}] FAIL rc={proc.returncode} "
+            f"in {duration:.2f}s\n"
             f"--- tail ---\n{tail}\n-----------",
             flush=True,
         )

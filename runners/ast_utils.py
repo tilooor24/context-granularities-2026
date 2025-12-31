@@ -7,10 +7,10 @@ JAVA_LANGUAGE = Language(
     str("tools/tree-sitter-lib/" "build/my-languages.so"), "java")
 
 
-C_LANGUAGE = Language(
-    "tools/tree-sitter-lib/build/my-languages.so",
-    "c",
-)
+# C_LANGUAGE = Language(
+#     "tools/tree-sitter-lib/build/my-languages.so",
+#     "c",
+# )
 
 
 def get_java_parser() -> Parser:
@@ -19,10 +19,10 @@ def get_java_parser() -> Parser:
     return parser
 
 
-def get_c_parser() -> Parser:
-    parser = Parser()
-    parser.set_language(C_LANGUAGE)
-    return parser
+# def get_c_parser() -> Parser:
+#     parser = Parser()
+#     parser.set_language(C_LANGUAGE)
+#     return parser
 
 
 def find_enclosing(node: Node, target_types: set[str]) -> Node | None:
